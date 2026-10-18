@@ -1,1 +1,4 @@
 python-telegram-bot==21.10
+python-binance==1.0.29
+pandas==2.2.3
+requests==2.32.3
