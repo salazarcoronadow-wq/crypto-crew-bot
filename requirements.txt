@@ -1,5 +1,1 @@
 python-telegram-bot==20.7
-python-binance==1.0.29
-pandas==2.2.3
-python-dotenv==1.1.0
-requests==2.31.0
