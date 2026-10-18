@@ -63,22 +63,25 @@ def analyze(df):
 
 def get_news():
     try:
-        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
-        r = requests.get(url, timeout=8).json()
-        txt = "**NOTICIAS:**\n\n"
-        for n in r.get("Data", [])[:3]:
-            txt += f"• {n['title'][:80]}\n"
+        url = "https://data-api.binance.vision/api/v3/ticker/24hr"
+        url = f"{url}?symbol=BTCUSDT"
+        r = requests.get(url, timeout=5).json()
+        ch = float(r.get("priceChangePercent", 0))
+        pr = float(r.get("lastPrice", 0))
+        txt = "**MERCADO 24H:**\n"
+        txt += f"BTC ${pr:.0f} {ch:.1f}%\n"
+        txt += "Tendencia segun flujo.\n"
         return txt
     except:
-        return "Noticias no disponibles"
+        return "Mercado activo - Usa /oportunidad"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "🧠 worren-crew-bot v5.3 ONLINE\n"
+    msg = "BOT v5.4 ONLINE\n"
     msg += "/oportunidad\n/top\n/analizar btc\n/noticias\n/balance"
     await update.message.reply_text(msg)
 
 async def oportunidad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧠 Escaneando... 20 seg")
+    await update.message.reply_text("Escaneando... 20 seg")
     res = []
     for s in SYMBOLS:
         df = get_candles(s)
@@ -92,28 +95,28 @@ async def oportunidad(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = f"Sin oportunidad clara. Mejor {top[0]} Score {top[1]}"
         await update.message.reply_text(txt)
         return
-    txt = f"🧠 CEREBRO {datetime.now().strftime('%H:%M')}\n\n"
+    txt = f"CEREBRO {datetime.now().strftime('%H:%M')}\n\n"
     for item in best[:3]:
         sym, sc, re, pr, rsi = item
-        e = "🟢" if sc >= 8 else "🟡"
+        e = "VERDE" if sc >= 8 else "AMAR"
         name = sym.replace("USDT","")
         txt += f"{e} {name} ${pr:.2f} Score {sc}\n {re}\n\n"
     txt += get_news()
     await update.message.reply_text(txt)
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔥 TOP 10...")
+    await update.message.reply_text("TOP 10...")
     res = []
     for s in SYMBOLS:
         df = get_candles(s)
         sc, re, pr, rsi = analyze(df)
         res.append((s, sc, re, pr, rsi))
     res.sort(key=lambda x: x[1], reverse=True)
-    txt = f"🔥 TOP 10 {datetime.now().strftime('%H:%M')}\n\n"
+    txt = f"TOP 10 {datetime.now().strftime('%H:%M')}\n\n"
     i = 1
     for item in res[:10]:
         sym, sc, re, pr, rsi = item
-        e = "🟢" if sc >= 7 else "🟡" if sc >= 5 else "🔴"
+        e = "G" if sc >= 7 else "Y" if sc >= 5 else "R"
         name = sym.replace("USDT","")
         txt += f"{i}. {e} {name} Score {sc} ${pr:.2f}\n {re}\n\n"
         i += 1
@@ -129,15 +132,15 @@ async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No hay datos {coin}")
         return
     sc, re, pr, rsi = analyze(df)
-    sig = "🟢 COMPRABLE" if sc >= 7 else "🟡 ESPERAR" if sc >= 5 else "🔴 PELIGRO"
-    txt = f"📊 {coin} ${pr:.4f}\nScore {sc}\nRSI {rsi:.1f}\n{re}\n\n{sig}"
+    sig = "COMPRABLE" if sc >= 7 else "ESPERAR" if sc >= 5 else "PELIGRO"
+    txt = f"{coin} ${pr:.4f}\nScore {sc}\nRSI {rsi:.1f}\n{re}\n\n{sig}"
     await update.message.reply_text(txt)
 
 async def noticias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_news())
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💰 Balance demo $1000 - v5.3 ACTIVE")
+    await update.message.reply_text("Balance demo $1000 - v5.4")
 
 def main():
     if not TOKEN or ":" not in TOKEN:
@@ -151,7 +154,7 @@ def main():
     app.add_handler(CommandHandler("analizar", analizar))
     app.add_handler(CommandHandler("noticias", noticias))
     app.add_handler(CommandHandler("balance", balance))
-    log.info("BOT v5.3 LISTO")
+    log.info("BOT v5.4 LISTO")
     app.run_polling()
 
 if __name__ == "__main__":
