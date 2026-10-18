@@ -172,4 +172,235 @@ def analyze_pro(df, fg_val, ajuste):
         score += 1.5
         reason += f"RSI {crsi:.0f} opt "
     elif crsi > 78:
-       
+        score -= 2.0
+        reason += f"RSI {crsi:.0f} sobrecompra "
+    elif crsi < 28:
+        score += 1.0
+        reason += f"RSI {crsi:.0f} sobreventa "
+    if v_ratio > 1.5:
+        score += 1.0
+        reason += f"Vol x{v_ratio:.1f} "
+    if fg_val < 25:
+        score += 1.0
+        reason += "Miedo extremo "
+    if fg_val > 85:
+        score -= 1.0
+        reason += "Codicia "
+    score += ajuste
+    score = max(1, min(10, round(score, 1)))
+    if not reason:
+        reason = f"Consolid RSI {crsi:.0f}"
+    return score, reason, price, crsi, v_ratio
+
+# --- JOBS AUTONOMOS ---
+async def job_auto_scan(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = get_chat_id()
+        if not chat_id:
+            return
+        fg_val, fg_txt = get_fear_greed()
+        ajuste, txt_apr = get_aprendizaje()
+        log.info(f"AUTO SCAN F&G {fg_val} {txt_apr}")
+        res = []
+        for s in SYMBOLS:
+            df = get_candles(s)
+            sc, re, pr, rsi, vr = analyze_pro(df, fg_val, ajuste)
+            res.append((s, sc, re, pr, rsi, vr))
+            time.sleep(0.08)
+        res.sort(key=lambda x: x[1], reverse=True)
+        best = [x for x in res if x[1] >= 9.0]
+        if not best:
+            return
+        txt = f"AUTO ALERTA v7.1 {datetime.now().strftime('%H:%M')} F&G {fg_val}\n"
+        txt += f"{txt_apr}\n\n"
+        for item in best[:2]:
+            sym, sc, re, pr, rsi, vr = item
+            name = sym.replace("USDT","")
+            entry = pr
+            stop = pr * 0.96
+            take1 = pr * 1.08
+            txt += f"G {name} ${pr:.4f} Score {sc}\n"
+            txt += f" {re}\n"
+            txt += f" Entrada ${entry:.4f} Stop ${stop:.4f}\n"
+            txt += f" TP ${take1:.4f}\n"
+            guardar_trade(sym, pr, sc, rsi)
+            txt += f" PAPER guardado\n\n"
+        await context.bot.send_message(chat_id=chat_id, text=txt)
+    except Exception as e:
+        log.error(f"job_auto_scan error {e} {traceback.format_exc()}")
+
+async def job_aprender(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        actualizar_aprendizaje_automatico()
+    except Exception as e:
+        log.error(f"job_aprender error {e}")
+
+# --- COMANDOS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    init_db()
+    save_chat_id(update.effective_chat.id)
+    msg = "BOT v7.1 AUTONOMO REAL ONLINE\n"
+    msg += "Ya guarda tu chat para alertas\n\n"
+    msg += "Modo: PAPER DEMO\n"
+    msg += "/oportunidad - Escanea ahora\n"
+    msg += "/top - Top 15\n"
+    msg += "/analizar btc\n"
+    msg += "/auto_on - Activa cada 30m REAL\n"
+    msg += "/auto_off - Desactiva\n"
+    msg += "/aprender - Ver cerebro\n"
+    msg += "/historial - Trades\n"
+    msg += "/balance"
+    await update.message.reply_text(msg)
+
+async def oportunidad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        save_chat_id(update.effective_chat.id)
+        fg_val, fg_txt = get_fear_greed()
+        ajuste, txt_apr = get_aprendizaje()
+        await update.message.reply_text(f"PRO 50 F&G {fg_val} {fg_txt}\n{txt_apr}\n30 seg...")
+        res = []
+        for s in SYMBOLS:
+            df = get_candles(s)
+            sc, re, pr, rsi, vr = analyze_pro(df, fg_val, ajuste)
+            res.append((s, sc, re, pr, rsi, vr))
+            time.sleep(0.08)
+        res.sort(key=lambda x: x[1], reverse=True)
+        best = [x for x in res if x[1] >= 8.0]
+        if not best:
+            top = res[0]
+            name = top[0].replace("USDT","")
+            txt = f"No Score 8+ Mejor {name} {top[1]} F&G {fg_val}"
+            await update.message.reply_text(txt)
+            return
+        txt = f"CEREBRO v7.1 {datetime.now().strftime('%H:%M')} F&G {fg_val}\n{txt_apr}\n\n"
+        for item in best[:3]:
+            sym, sc, re, pr, rsi, vr = item
+            name = sym.replace("USDT","")
+            entry = pr
+            stop = pr * 0.96
+            take1 = pr * 1.08
+            take2 = pr * 1.15
+            txt += f"G {name} ${pr:.4f} Score {sc}\n {re}\n"
+            txt += f" Entrada ${entry:.4f} Stop ${stop:.4f}\n"
+            txt += f" TP1 ${take1:.4f} TP2 ${take2:.4f}\n"
+            guardar_trade(sym, pr, sc, rsi)
+            txt += f" PAPER guardado\n\n"
+        await update.message.reply_text(txt)
+    except Exception as e:
+        log.error(traceback.format_exc())
+        await update.message.reply_text(f"Error: {e}")
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        fg_val, fg_txt = get_fear_greed()
+        ajuste, _ = get_aprendizaje()
+        await update.message.reply_text(f"TOP 15 F&G {fg_val}...")
+        res = []
+        for s in SYMBOLS:
+            df = get_candles(s)
+            sc, re, pr, rsi, vr = analyze_pro(df, fg_val, ajuste)
+            res.append((s, sc, re, pr, rsi, vr))
+        res.sort(key=lambda x: x[1], reverse=True)
+        txt = f"TOP 15 v7.1 {datetime.now().strftime('%H:%M')}\n\n"
+        i = 1
+        for item in res[:15]:
+            sym, sc, re, pr, rsi, vr = item
+            e = "G" if sc >= 8 else "Y" if sc >= 6 else "R"
+            name = sym.replace("USDT","")
+            txt += f"{i}. {e} {name} Sc {sc} ${pr:.2f} {re}\n\n"
+            i += 1
+        await update.message.reply_text(txt)
+    except Exception as e:
+        await update.message.reply_text(f"Error top {e}")
+
+async def analizar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Uso: /analizar btc")
+        return
+    try:
+        fg_val, fg_txt = get_fear_greed()
+        ajuste, _ = get_aprendizaje()
+        coin = context.args[0].upper().replace("USDT","") + "USDT"
+        df = get_candles(coin)
+        if df.empty:
+            await update.message.reply_text(f"No datos {coin}")
+            return
+        sc, re, pr, rsi, vr = analyze_pro(df, fg_val, ajuste)
+        txt = f"ANALISIS {coin} ${pr:.4f}\nSc {sc} RSI {rsi:.1f} Vol x{vr:.1f}\n"
+        txt += f"F&G {fg_val} {re}\nStop {pr*0.96:.4f} TP {pr*1.08:.4f}"
+        await update.message.reply_text(txt)
+    except Exception as e:
+        await update.message.reply_text(f"Error {e}")
+
+async def aprender_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ajuste, txt = get_aprendizaje()
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.cursor()
+        cur.execute("SELECT simbolo, precio, score, resultado, pnl FROM trades ORDER BY id DESC LIMIT 10")
+        rows = cur.fetchall()
+        con.close()
+        msg = f"CEREBRO v7.1:\n{txt}\n\nUltimos 10:\n"
+        for r in rows:
+            msg += f"{r[0]} ${r[1]:.2f} Sc {r[2]} {r[3]} {r[4]:.1f}%\n"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"{txt} Error {e}")
+
+async def historial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await aprender_cmd(update, context)
+
+async def auto_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_chat_id(update.effective_chat.id)
+    # Programa jobs si no existen
+    try:
+        # Elimina previos
+        for job in context.job_queue.get_jobs_by_name("auto_scan"):
+            job.schedule_removal()
+        for job in context.job_queue.get_jobs_by_name("auto_aprender"):
+            job.schedule_removal()
+        # Crea nuevos cada 30m y 4h
+        context.job_queue.run_repeating(job_auto_scan, interval=1800, first=10, name="auto_scan")
+        context.job_queue.run_repeating(job_aprender, interval=14400, first=20, name="auto_aprender")
+        await update.message.reply_text("AUTO ON REAL ACTIVADO\nCada 30m escanea 50 monedas\nSolo te avisa si Score 9+\nCada 4h aprende solo si gano/perdio")
+    except Exception as e:
+        await update.message.reply_text(f"Error auto_on {e}")
+
+async def auto_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        for job in context.job_queue.get_jobs_by_name("auto_scan"):
+            job.schedule_removal()
+        for job in context.job_queue.get_jobs_by_name("auto_aprender"):
+            job.schedule_removal()
+        await update.message.reply_text("AUTO OFF - Ya no escanea solo")
+    except Exception as e:
+        await update.message.reply_text(f"Error auto_off {e}")
+
+async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = get_chat_id()
+    await update.message.reply_text(f"v7.1 AUTONOMO REAL\nPaper: {PAPER_MODE}\nChat ID: {chat}\n50 monedas\nJobs activos cada 30m y 4h")
+
+def main():
+    init_db()
+    if not TOKEN or ":" not in TOKEN:
+        log.error("TOKEN MALO")
+        time.sleep(99999)
+    app = ApplicationBuilder().token(TOKEN).build()
+    # Jobs que siempre corren aunque no des auto_on
+    app.job_queue.run_repeating(job_aprender, interval=14400, first=30, name="auto_aprender")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("oportunidad", oportunidad))
+    app.add_handler(CommandHandler("oportunidades", oportunidad))
+    app.add_handler(CommandHandler("top", top_cmd))
+    app.add_handler(CommandHandler("analizar", analizar_cmd))
+    app.add_handler(CommandHandler("aprender", aprender_cmd))
+    app.add_handler(CommandHandler("historial", historial_cmd))
+    app.add_handler(CommandHandler("auto_on", auto_on_cmd))
+    app.add_handler(CommandHandler("auto_off", auto_off_cmd))
+    app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(CommandHandler("noticias", balance_cmd))
+    log.info("BOT v7.1 AUTONOMO REAL LISTO")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
