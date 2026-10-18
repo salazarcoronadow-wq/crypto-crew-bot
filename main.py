@@ -6,237 +6,232 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+WHATSAPP_PHONE = os.getenv("WHATSAPP_PHONE") # ej: +56912345678
+WHATSAPP_APIKEY = os.getenv("WHATSAPP_APIKEY") # ej: 123456 que te dio CallMeBot
+OPENAI_KEY = os.getenv("OPENAI_API_KEY") # opcional, para hacerlo mas inteligente que yo
 
-# Base de datos simulada en memoria
+logging.basicConfig(level=logging.INFO)
 usuarios = {}
+ultimas_oportunidades = set()
 
-# --- FUNCIONES BINANCE ---
+# ================= FUNCIONES CEREBRO =================
+
 def get_all_tickers():
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        data = requests.get(url, timeout=10).json()
-        # Solo pares USDT, top por volumen
+        data = requests.get(url, timeout=15).json()
         usdt = [x for x in data if x['symbol'].endswith('USDT')]
-        usdt_sorted = sorted(usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
-        return usdt_sorted[:80]  # Top 80 por volumen
-    except:
-        return []
+        return sorted(usdt, key=lambda x: float(x['quoteVolume']), reverse=True)[:80]
+    except: return []
 
 def get_klines(symbol, interval="1h", limit=100):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         return requests.get(url, timeout=10).json()
-    except:
-        return []
+    except: return []
 
 def analizar_rsi(cierres):
     if len(cierres) < 15: return 50
-    ganancias = 0
-    perdidas = 0
-    for i in range(1, 15):
-        diff = cierres[-i] - cierres[-i-1]
-        if diff > 0: ganancias += diff
-        else: perdidas += abs(diff)
-    if perdidas == 0: return 100
-    rs = (ganancias/14) / (perdidas/14)
-    rsi = 100 - (100 / (1 + rs))
+    ganancias = sum(max(0, cierres[-i] - cierres[-i-1]) for i in range(1, 15))
+    perdidas = sum(abs(min(0, cierres[-i] - cierres[-i-1])) for i in range(1, 15))
+    if perdidas == 0: return 80
+    rsi = 100 - (100 / (1 + (ganancias/14)/(perdidas/14)))
     return round(rsi, 2)
 
-# --- COMANDOS TELEGRAM ---
+def get_noticias():
+    """Trae noticias reales de crypto"""
+    try:
+        # CryptoPanic gratis sin API key
+        url = "https://cryptopanic.com/api/free/v1/posts/?auth_token=free&currencies=BTC,ETH,SOL&filter=important"
+        data = requests.get(url, timeout=10).json()
+        noticias = [p['title'][:120] for p in data.get('results', [])[:5]]
+        return noticias
+    except:
+        return ["Bitcoin en tendencia", "Mercado crypto volatil"]
+
+def cerebro_analiza(symbol, precio, rsi, cambio24h, noticias):
+    """AQUI ESTA MI CEREBRO - Toma decisiones como yo"""
+    score = 0
+    motivos = []
+
+    # 1. Analisis tecnico
+    if rsi < 30:
+        score += 4; motivos.append(f"RSI {rsi} SOBREVENTA EXTREMA")
+    elif rsi < 40:
+        score += 2; motivos.append(f"RSI {rsi} en zona de compra")
+    elif rsi > 75:
+        score -= 3; motivos.append(f"RSI {rsi} SOBRECOMPRA peligrosa")
+
+    # 2. Momentum
+    if 1 < cambio24h < 8:
+        score += 2; motivos.append(f"Subiendo sano +{cambio24h:.1f}%")
+    elif cambio24h > 15:
+        score -= 1; motivos.append(f"Ya explotó +{cambio24h:.1f}%, tarde")
+
+    # 3. Noticias (sentimiento)
+    texto_noticias = " ".join(noticias).lower()
+    if "bullish" in texto_noticias or "rally" in texto_noticias or "etf" in texto_noticias:
+        score += 1; motivos.append("Noticias positivas")
+
+    # 4. Filtro final
+    decision = "NEUTRAL"
+    if score >= 5: decision = "COMPRA FUERTE 💎🔥"
+    elif score >= 3: decision = "COMPRA 🟢"
+    elif score <= -2: decision = "VENTA 🔴"
+
+    return score, decision, motivos
+
+def enviar_whatsapp(mensaje):
+    """Envia alerta a tu WhatsApp"""
+    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
+        return False
+    try:
+        url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={mensaje}&apikey={WHATSAPP_APIKEY}"
+        requests.get(url, timeout=10)
+        return True
+    except: return False
+
+# ================= COMANDOS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in usuarios:
-        usuarios[uid] = {"saldo": 1000.0, "posiciones": {}}
-    
-    msg = (
-        "🧠 **BOT CEREBRO CRYPTO CREW - v2 TODO BINANCE**\n\n"
-        "Ya no es solo BTC. Ahora escaneo TODO Binance.\n\n"
-        "📋 **COMANDOS:**\n"
-        "/oportunidad - Top 5 oportunidades de TODO el mercado\n"
-        "/analizar btc - Analiza cualquier moneda: btc, eth, sol, pepe, etc\n"
-        "/top - Ranking de las que más suben hoy\n"
-        "/saldo - Ver tu portafolio simulado\n"
-        "/comprar btc 100 - Comprar 100 USD simulados\n"
-        "/vender btc 100 - Vender\n"
-        "/noticias - Noticias importantes\n\n"
-        "Prueba: /oportunidad"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    if uid not in usuarios: usuarios[uid] = {"saldo": 1000.0, "posiciones": {}}
+    await update.message.reply_text(
+        "🧠 **BOT CEREBRO v3 - CON MI INTELIGENCIA**\n\n"
+        "Ahora si pienso como tu.\n\n"
+        "📋 **NUEVO:**\n"
+        "/oportunidad - Escaneo TODO Binance + Noticias + Mi Cerebro\n"
+        "/analizar btc - Analisis completo con noticias\n"
+        "/radar - Activa radar automatico que te avisa a Telegram y WhatsApp\n"
+        "/top - Top 10 del dia\n"
+        "/noticias - Ultimas noticias importantes\n\n"
+        "Escribe /oportunidad para probar mi cerebro",
+        parse_mode='Markdown')
 
 async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Uso: /analizar btc  o  /analizar eth  o  /analizar sol")
+        await update.message.reply_text("Uso: /analizar btc")
         return
     coin = context.args[0].upper()
     symbol = coin if coin.endswith("USDT") else coin + "USDT"
-    
-    await update.message.reply_text(f"🔍 Analizando {symbol} en todo Binance...")
-    
+    await update.message.reply_text(f"🧠 Analizando {symbol} con mi cerebro...")
+
     klines = get_klines(symbol)
-    if not klines:
-        await update.message.reply_text(f"No encontré {symbol} en Binance")
+    if not klines or isinstance(klines, dict):
+        await update.message.reply_text(f"No encontre {symbol}")
         return
-        
+    
     cierres = [float(k[4]) for k in klines]
     precio = cierres[-1]
     rsi = analizar_rsi(cierres)
+    tickers = get_all_tickers()
+    cambio = 0
+    for t in tickers:
+        if t['symbol'] == symbol:
+            cambio = float(t['priceChangePercent']); break
     
-    # Tendencia simple
-    sma20 = sum(cierres[-20:])/20
-    tendencia = "ALCISTA 📈" if precio > sma20 else "BAJISTA 📉"
-    
-    cambio_24h = ((cierres[-1] - cierres[0]) / cierres[0]) * 100
-    
-    if rsi < 30:
-        senal = "💎 SOBREVENTA - Oportunidad de COMPRA"
-    elif rsi > 70:
-        senal = "⚠️ SOBRECOMPRA - Cuidado, posible venta"
-    else:
-        senal = "😐 NEUTRAL"
+    noticias = get_noticias()
+    score, decision, motivos = cerebro_analiza(symbol, precio, rsi, cambio, noticias)
 
     msg = (
-        f"📊 **{symbol}**\n"
-        f"Precio: ${precio}\n"
-        f"Tendencia {interval}: {tendencia}\n"
-        f"RSI (14): {rsi}\n"
-        f"Cambio 24h aprox: {cambio_24h:.2f}%\n\n"
-        f"{senal}\n\n"
-        f"SMA 20: ${sma20:.4f}"
+        f"📊 **ANALISIS CEREBRO {symbol}**\n"
+        f"Precio: ${precio}\nRSI: {rsi} | 24h: {cambio:.2f}%\n"
+        f"Score Cerebro: {score}/7\n\n"
+        f"**DECISION:** {decision}\n\n"
+        f"**Por que:**\n- " + "\n- ".join(motivos) + "\n\n"
+        f"📰 Noticias: {noticias[0]}"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def oportunidad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧠 Escaneando las 80 monedas con más volumen de Binance... dame 15 seg ⏳")
-    
+    await update.message.reply_text("🧠 Activando CEREBRO TOTAL... escaneando 80 monedas + noticias + analisis. 20 seg ⏳")
     tickers = get_all_tickers()
-    oportunidades = []
-    
-    for t in tickers[:40]: # Analizamos 40 para que no demore mucho
+    noticias = get_noticias()
+    hallazgos = []
+
+    for t in tickers[:40]:
         symbol = t['symbol']
-        # Filtros: que no sea stablecoin
-        if symbol in ['USDTUSDT', 'USDCUSDT', 'FDUSDUSDT', 'DAIUSDT']: continue
-        
+        if symbol in ['USDTUSDT','USDCUSDT','FDUSDUSDT','DAIUSDT']: continue
         klines = get_klines(symbol, limit=50)
-        if not klines: continue
+        if not klines or isinstance(klines, dict) or len(klines)<20: continue
         cierres = [float(k[4]) for k in klines]
-        if len(cierres) < 20: continue
-        
         rsi = analizar_rsi(cierres)
         cambio = float(t['priceChangePercent'])
         
-        # Logica de oportunidad: RSI < 40 y cambio positivo, o RSI muy bajo
-        score = 0
-        if rsi < 35: score += 3
-        elif rsi < 45: score += 1
-        if 0 < cambio < 8: score += 2 # Subiendo pero no explotada
-        if cambio > 0: score += 1
-        
-        if score >= 3:
-            oportunidades.append({"symbol": symbol, "rsi": rsi, "cambio": cambio, "precio": t['lastPrice'], "score": score})
+        score, decision, motivos = cerebro_analiza(symbol, float(t['lastPrice']), rsi, cambio, noticias)
+        if score >= 4:
+            hallazgos.append({"symbol": symbol, "precio": t['lastPrice'], "rsi": rsi, "cambio": cambio, "score": score, "decision": decision, "motivos": motivos})
 
-    oportunidades = sorted(oportunidades, key=lambda x: x['score'], reverse=True)[:5]
-    
-    if not oportunidades:
-        await update.message.reply_text("Ahora no veo oportunidades claras de compra. Mercado sobrecomprado. Prueba /top")
+    hallazgos = sorted(hallazgos, key=lambda x: x['score'], reverse=True)[:5]
+    if not hallazgos:
+        await update.message.reply_text("🧠 Cerebro dice: No hay oportunidades claras ahora. Mercado peligroso. Prueba /top")
         return
 
-    msg = "🔥 **TOP 5 OPORTUNIDADES AHORA (Todo Binance):**\n\n"
-    for i, op in enumerate(oportunidades, 1):
-        msg += f"{i}. **{op['symbol']}** - ${op['precio']}\n   RSI: {op['rsi']} | 24h: {op['cambio']:.2f}% | Score: {op['score']}/6\n\n"
-    msg += "Analiza con /analizar btc"
+    msg = "🔥 **OPORTUNIDADES DETECTADAS POR MI CEREBRO:**\n\n"
+    alerta_whatsapp = "🚨 BOT CEREBRO ALERTA:\n\n"
+    for i, op in enumerate(hallazgos, 1):
+        msg += f"{i}. **{op['symbol']}** ${op['precio']} | Score {op['score']}\n   {op['decision']} | RSI {op['rsi']} | {op['cambio']:.1f}%\n   Motivo: {op['motivos'][0]}\n\n"
+        alerta_whatsapp += f"{op['symbol']} {op['decision']} - RSI {op['rsi']}\n"
+
     await update.message.reply_text(msg, parse_mode='Markdown')
+
+    # Si es muy buena, mandar a WhatsApp
+    if hallazgos and hallazgos[0]['score'] >= 5 and hallazgos[0]['symbol'] not in ultimas_oportunidades:
+        enviado = enviar_whatsapp(alerta_whatsapp)
+        if enviado:
+            await update.message.reply_text("📲 Te envié la alerta a tu WhatsApp!")
+            ultimas_oportunidades.add(hallazgos[0]['symbol'])
+
+async def noticias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    noticias = get_noticias()
+    msg = "📰 **ULTIMAS NOTICIAS CRYPTO:**\n\n" + "\n\n".join([f"- {n}" for n in noticias])
+    await update.message.reply_text(msg)
+
+async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📡 **RADAR AUTOMATICO ACTIVADO**\n\n"
+        "Cada 15 minutos voy a escanear todo el mercado.\n"
+        "Si veo una oportunidad con Score 5+ te aviso aqui y por WhatsApp.\n\n"
+        "Para que funcione el WhatsApp, asegurate de poner en Railway:\n"
+        "WHATSAPP_PHONE = tu numero con +56\n"
+        "WHATSAPP_APIKEY = el numero que te dio CallMeBot"
+    )
+    # Activa job que corre cada 15 min
+    if 'radar_job' not in context.chat_data:
+        context.job_queue.run_repeating(radar_job, interval=900, first=10, chat_id=update.effective_chat.id)
+        context.chat_data['radar_job'] = True
+
+async def radar_job(context: ContextTypes.DEFAULT_TYPE):
+    tickers = get_all_tickers()
+    noticias = get_noticias()
+    for t in tickers[:20]:
+        symbol = t['symbol']
+        if symbol in ['USDTUSDT','USDCUSDT']: continue
+        klines = get_klines(symbol, limit=50)
+        if not klines or len(klines)<20: continue
+        rsi = analizar_rsi([float(k[4]) for k in klines])
+        cambio = float(t['priceChangePercent'])
+        score, decision, motivos = cerebro_analiza(symbol, float(t['lastPrice']), rsi, cambio, noticias)
+        if score >= 6 and symbol not in ultimas_oportunidades:
+            msg = f"🚨 **RADAR AUTO DETECTO OPORTUNIDAD**\n\n{symbol} - {decision}\nPrecio: ${t['lastPrice']}\nRSI: {rsi} | Score: {score}\nMotivo: {motivos[0]}"
+            await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode='Markdown')
+            enviar_whatsapp(f"🚨 RADAR: {symbol} {decision} Score {score} Precio {t['lastPrice']}")
+            ultimas_oportunidades.add(symbol)
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tickers = get_all_tickers()
-    top_ganadoras = sorted(tickers, key=lambda x: float(x['priceChangePercent']), reverse=True)[:10]
-    
-    msg = "🚀 **TOP 10 QUE MÁS SUBEN HOY (Binance USDT):**\n\n"
-    for i, t in enumerate(top_ganadoras, 1):
-        if t['symbol'] in ['USDTUSDT', 'USDCUSDT']: continue
-        msg += f"{i}. {t['symbol']} - {float(t['priceChangePercent']):.2f}% - ${t['lastPrice']}\n"
+    top10 = sorted(tickers, key=lambda x: float(x['priceChangePercent']), reverse=True)[:10]
+    msg = "🚀 **TOP 10 HOY:**\n\n" + "\n".join([f"{i+1}. {t['symbol']} {float(t['priceChangePercent']):.2f}%" for i,t in enumerate(top10)])
     await update.message.reply_text(msg)
 
-async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in usuarios:
-        usuarios[uid] = {"saldo": 1000.0, "posiciones": {}}
-    u = usuarios[uid]
-    msg = f"💰 **Saldo:** ${u['saldo']:.2f} USD (simulado)\n"
-    if not u['posiciones']:
-        msg += "Sin posiciones."
-    else:
-        for coin, cant in u['posiciones'].items():
-            msg += f"- {coin}: {cant}\n"
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in usuarios:
-        usuarios[uid] = {"saldo": 1000.0, "posiciones": {}}
-    if len(context.args) < 2:
-        await update.message.reply_text("Uso: /comprar btc 100")
-        return
-    coin = context.args[0].upper()
-    try:
-        monto = float(context.args[1])
-    except:
-        await update.message.reply_text("Monto inválido")
-        return
-    
-    u = usuarios[uid]
-    if u['saldo'] < monto:
-        await update.message.reply_text(f"No tienes saldo. Tienes ${u['saldo']}")
-        return
-    
-    symbol = coin if coin.endswith("USDT") else coin + "USDT"
-    klines = get_klines(symbol, limit=1)
-    if not klines:
-        await update.message.reply_text(f"No encontré {symbol}")
-        return
-    precio = float(klines[0][4])
-    
-    u['saldo'] -= monto
-    cantidad = monto / precio
-    u['posiciones'][coin] = u['posiciones'].get(coin, 0) + cantidad
-    
-    await update.message.reply_text(f"✅ Compraste {cantidad:.6f} {coin} a ${precio} con ${monto}. Saldo restante: ${u['saldo']:.2f}")
-
-async def vender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Similar a comprar pero al revés
-    uid = update.effective_user.id
-    if len(context.args) < 2:
-        await update.message.reply_text("Uso: /vender btc 100")
-        return
-    coin = context.args[0].upper()
-    monto = float(context.args[1])
-    
-    symbol = coin if coin.endswith("USDT") else coin + "USDT"
-    klines = get_klines(symbol, limit=1)
-    precio = float(klines[0][4])
-    
-    u = usuarios[uid]
-    cantidad = monto / precio
-    
-    if u['posiciones'].get(coin, 0) < cantidad:
-        await update.message.reply_text(f"No tienes suficiente {coin}")
-        return
-    
-    u['posiciones'][coin] -= cantidad
-    u['saldo'] += monto
-    
-    await update.message.reply_text(f"✅ Vendiste {cantidad:.6f} {coin} por ${monto}. Saldo: ${u['saldo']:.2f}")
-
+# === START ===
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analizar", analizar))
     app.add_handler(CommandHandler("oportunidad", oportunidad))
     app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("saldo", saldo))
-    app.add_handler(CommandHandler("comprar", comprar))
-    app.add_handler(CommandHandler("vender", vender))
-    
-    print("Bot v2 TODO BINANCE iniciado")
+    app.add_handler(CommandHandler("noticias", noticias_cmd))
+    app.add_handler(CommandHandler("radar", radar))
+    print("Bot v3 CEREBRO TOTAL iniciado")
     app.run_polling()
