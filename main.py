@@ -11,7 +11,7 @@ SYMBOLS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT
 
 def get_candles(symbol, limit=100):
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
+url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
         r = requests.get(url, timeout=10).json()
         if not r or isinstance(r, dict) or len(r)<50: return pd.DataFrame()
         df = pd.DataFrame(r, columns=["t","o","h","l","c","v","ct","qv","tr","tb","tq","ig"])
