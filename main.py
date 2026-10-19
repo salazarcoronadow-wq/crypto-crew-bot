@@ -1,7 +1,6 @@
 import os, time, logging, sqlite3, requests
 from datetime import datetime
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -42,7 +41,8 @@ def init_db():
     c.execute("CREATE TABLE IF NOT EXISTS config (clave TEXT PRIMARY KEY, valor TEXT)")
     c.execute("INSERT OR IGNORE INTO cerebro VALUES ('rsi_max',68.0)"); c.execute("INSERT OR IGNORE INTO cerebro VALUES ('vol_min',1.8)")
     c.execute("INSERT OR IGNORE INTO cerebro VALUES ('score_min',9.0)"); c.execute("INSERT OR IGNORE INTO cerebro VALUES ('entropia_max',0.04)")
-    c.execute("INSERT OR IGNORE INTO config VALUES ('trading_real','OFF')"); c.execute("INSERT OR IGNORE INTO config VALUES ('trades_hoy','0')")
+    c.execute("INSERT OR IGNORE INTO config VALUES ('trading_real','ON')"); c.execute("INSERT OR IGNORE INTO config VALUES ('trades_hoy','0')")
+    c.execute("INSERT OR IGNORE INTO config VALUES ('modo_inmortal','ON')")
     con.commit(); con.close()
 
 def save_chat(cid):
@@ -108,45 +108,53 @@ def leer_grafico_ultra(symbol):
         if 20<=stoch_k<=75: score+=1
         if momentum>0 and entropia<get_cerebro('entropia_max',0.04): score+=1.5
         score=min(score,10.0)
-        return {"rsi":round(rsi,1),"vol_x":round(vol_x,2),"tendencia":tendencia,"score":round(score,1),"precio":closes[-1],"ema20":ema20,"boll_ok":boll_ok,"macd":round(macd_line,4),"stoch_k":round(stoch_k,1),"momentum":round(momentum,4),"entropia":round(entropia,5)}
+        return {"rsi":round(rsi,1),"vol_x":round(vol_x,2),"tendencia":tendencia,"score":round(score,1),"precio":closes[-1],"macd":round(macd_line,4),"stoch_k":round(stoch_k,1),"momentum":round(momentum,4),"entropia":round(entropia,5)}
     except: return None
 
 def comprar_real_binance(symbol, monto_usdt=10):
-    # 6) OPERA POR TI EN BINANCE 24/7
+    # MODO REAL INMORTAL: si cuenta en cero, NO para, sigue aprendiendo
     if get_config('trading_real','OFF')!='ON':
-        return False, "Trading real OFF - Usa /trading_real_on para activar"
+        return False, "Trading real OFF"
     try:
         trades_hoy=int(get_config('trades_hoy','0'))
         if trades_hoy>=3:
-            return False, "Limite 3 trades hoy alcanzado (proteccion)"
-        # Verifica balance
+            return False, "Limite 3 trades hoy (proteccion 24/7)"
         balance=client.get_asset_balance(asset='USDT')
         usdt_disp=float(balance['free'])
         if usdt_disp < monto_usdt:
-            return False, f"USDT insuficiente {usdt_disp:.2f} < {monto_usdt}"
-        # Compra market
+            # AQUI ESTA LA CLAVE: cuenta en cero, sigue aprendiendo, no se apaga
+            guardar_memoria(f"Cuenta en 0 ({usdt_disp:.2f} USDT). Queria comprar {symbol} a {fmt(float(client.get_symbol_ticker(symbol=symbol)['price']))} Score 9+ pero sin saldo. Sigo aprendiendo 24/7 sin descanso.", "cuenta_cero_aprendizaje", symbol)
+            return False, f"Cuenta en 0 ({usdt_disp:.2f} USDT) - SIGO APRENDIENDO 24/7 sin parar, esperando saldo"
         qty=monto_usdt / float(client.get_symbol_ticker(symbol=symbol)['price'])
-        # Ajusta lot size
         info=client.get_symbol_info(symbol)
         step_size=float([f for f in info['filters'] if f['filterType']=='LOT_SIZE'][0]['stepSize'])
         qty=round(qty - (qty % step_size), 6)
         order=client.order_market_buy(symbol=symbol, quantity=qty)
-        guardar_memoria(f"COMPRA REAL {symbol} qty {qty} precio {fmt(order['fills'][0]['price'])}", "compra_real", symbol)
+        guardar_memoria(f"COMPRA REAL 24/7 {symbol} qty {qty}", "compra_real", symbol)
         set_config('trades_hoy', str(trades_hoy+1))
-        return True, f"COMPRÉ REAL {symbol} qty {qty} ID {order['orderId']}"
-    except BinanceAPIException as e:
-        return False, f"Binance error {e}"
+        return True, f"COMPRÉ REAL 24/7 {symbol} qty {qty}"
     except Exception as e:
-        return False, f"Error compra {e}"
+        guardar_memoria(f"Fallo compra {symbol} error {e} - pero sigo aprendiendo 24/7 inmortal", "error_aprendizaje", symbol)
+        return False, f"Error {e} - pero sigo aprendiendo 24/7"
 
 async def job_scan(context):
     try:
-        if not client: return
+        if not client:
+            try: 
+                from binance.client import Client as C2
+                global client
+                client=C2()
+            except: return
         fg,_=get_fear_greed(); btc=get_tendencia_btc()
-        if fg<12: return
+        # Resetea contador diario
+        if datetime.utcnow().hour==0 and datetime.utcnow().minute<30:
+            set_config('trades_hoy','0')
+        if fg<10:
+            guardar_memoria(f"F&G {fg} extremo, no opero pero sigo analizando 250 monedas 24/7", "proteccion", "GENERAL")
+            return
         tickers=client.get_ticker(); usdt=sorted([t for t in tickers if t['symbol'].endswith('USDT')], key=lambda x: float(x['quoteVolume']), reverse=True)
         encontradas=[]
-        for t in usdt[:200]:
+        for t in usdt[:250]:
             sym=t['symbol']
             if es_estable(sym,t['lastPrice']): continue
             data=leer_grafico_ultra(sym)
@@ -158,103 +166,75 @@ async def job_scan(context):
             for sym,data in encontradas:
                 noticias=get_crypto_noticias()
                 base=sym.replace("USDT","")
-                # Si trading real ON, compra solo
                 compra_msg=""
                 if get_config('trading_real','OFF')=='ON':
                     ok, msg_compra=comprar_real_binance(sym, MONTO)
-                    compra_msg=f"\n🤖 {msg_compra}\n"
-                    # Guarda trade real
-                    con=sqlite3.connect(DB); con.execute("INSERT INTO trades (simbolo,precio,score,rsi,volx,tendencia,fg,noticia,resultado,pnl,real,fecha,tipo,momentum,entropia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sym,data['precio'],data['score'],data['rsi'],data['vol_x'],data['tendencia'],fg,str(noticias[:2]),"COMPRADO_REAL",0,1,datetime.now().isoformat(),"SPOT_REAL",data['momentum'],data['entropia'])); con.commit(); con.close()
-                txt=f"🚀 ULTRA 24/7 AUTO {datetime.now().strftime('%H:%M')} F&G {fg} BTC {btc}\n💎 {base} {fmt(data['precio'])} Score {data['score']}/10 RSI {data['rsi']} Mom {data['momentum']}\n{compra_msg}Noticias {noticias}\n/oportunidad para mas"
+                    compra_msg=f"\n🤖 {msg_compra}\n🧠 Sigo aprendiendo aunque este en 0"
+                # Guarda siempre como aprendizaje aunque no compre
+                con=sqlite3.connect(DB); con.execute("INSERT INTO trades (simbolo,precio,score,rsi,volx,tendencia,fg,noticia,resultado,pnl,real,fecha,tipo,momentum,entropia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sym,data['precio'],data['score'],data['rsi'],data['vol_x'],data['tendencia'],fg,str(noticias[:2]),"APRENDIZAJE_24_7",0,0,datetime.now().isoformat(),"SPOT",data['momentum'],data['entropia'])); con.commit(); con.close()
+                txt=f"🚀 ULTRA 24/7 INMORTAL {datetime.now().strftime('%H:%M')} F&G {fg} BTC {btc}\n💎 {base} {fmt(data['precio'])} Score {data['score']}/10 RSI {data['rsi']} Mom {data['momentum']}\n{compra_msg}\nNoticias {noticias}\nModo {get_config('trading_real','OFF')} - Aprendo con y sin dinero 24/7 365"
                 for chat in chats:
                     try: await context.bot.send_message(chat_id=chat[0], text=txt)
                     except: pass
-    except Exception as e: log.error(f"job_scan {e}")
+        else:
+            # Aunque no encuentre nada, guarda que aprendio
+            guardar_memoria(f"Scan 24/7 {datetime.now().strftime('%H:%M')} revisadas 250 F&G {fg} BTC {btc} sin oportunidad 9/10 - sigo aprendiendo", "scan_24_7", "GENERAL")
+    except Exception as e: log.error(f"job_scan {e}"); guardar_memoria(f"Error scan {e} pero sigo vivo 24/7", "error", "GENERAL")
+
+async def job_learn(context):
+    try:
+        con=sqlite3.connect(DB); cur=con.cursor()
+        cur.execute("SELECT rsi, volx FROM trades WHERE pnl<0 ORDER BY id DESC LIMIT 20")
+        per=cur.fetchall(); con.close()
+        if per:
+            avg_rsi=sum([p[0] for p in per])/len(per)
+            guardar_memoria(f"Aprendizaje 24/7 automatico {datetime.now().strftime('%H:%M')} analice {len(per)} perdidas RSI avg {avg_rsi:.1f} - sigo mejorando aunque cuenta en 0", "auto_aprendizaje_24_7", "GENERAL")
+    except: pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id); fg,_=get_fear_greed(); btc=get_tendencia_btc()
-    trading=get_config('trading_real','OFF')
-    await update.message.reply_text(f"ULTRA BOT v11 FINAL 24/7 365 LISTO\n1 Mente propia ON\n2 Autonomo investiga ON\n3 Redes ON\n4 Fisica+Quimica ON\n5 Noticias+Futuros PAPER ON\n6 24/7 365 OPERANDO SOLO EN BINANCE: {trading}\nF&G {fg} BTC {btc} API {'OK' if client else 'FALLO'}\nCerebro Score min {get_cerebro('score_min',9.0)}\n/oportunidad /top /analizar BTCUSDT /aprender /auto_on /futuros_paper\n/trading_real_on - ACTIVA QUE OPERE SOLO 24/7\n/trading_real_off - Desactiva\n/auto_on - Activa aviso automatico")
+    await update.message.reply_text(f"ULTRA BOT v11.1 INMORTAL 24/7 365 ACTIVADO\n✅ MODO REAL ON - Con plata compra, sin plata SIGUE APRENDIENDO\n✅ Nunca descansa, nunca se apaga\n1 Mente propia ON\n2 Autonomo investiga ON\n3 Redes ON\n4 Fisica+Quimica ON\n5 Noticias+Futuros ON\n6 24/7 365 OPERANDO: {get_config('trading_real','OFF')} | INMORTAL: {get_config('modo_inmortal','ON')}\nF&G {fg} BTC {btc}\n/auto_on - Ya esta activo\n/trading_real_off - Para modo real")
 
 async def oportunidad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id)
     try:
-        if not client: client=Client()
+        if not client: from binance.client import Client; client=Client()
         fg,_=get_fear_greed(); btc=get_tendencia_btc(); noticias=get_crypto_noticias()
-        if fg<12: await update.message.reply_text(f"MIEDO EXTREMO F&G {fg} - Proteccion ON"); return
-        await update.message.reply_text(f"ULTRA 24/7 ANALIZANDO 250... F&G {fg} BTC {btc} Noticias {noticias[:3]} Trading Real {get_config('trading_real','OFF')}")
+        await update.message.reply_text(f"ULTRA INMORTAL ANALIZANDO 250... F&G {fg} BTC {btc} Modo Real {get_config('trading_real','OFF')} - Aprendo con o sin dinero")
         tickers=client.get_ticker(); usdt=sorted([t for t in tickers if t['symbol'].endswith('USDT')], key=lambda x: float(x['quoteVolume']), reverse=True)
-        encontradas=[]; rev=0; bloq=0
+        encontradas=[]; rev=0
         for t in usdt:
             sym=t['symbol']
-            if es_estable(sym,t['lastPrice']): bloq+=1; continue
+            if es_estable(sym,t['lastPrice']): continue
             rev+=1; data=leer_grafico_ultra(sym)
-            if not data or data['score']<get_cerebro('score_min',9.0) or data['tendencia']!="alcista" or not data['boll_ok'] or data['entropia']>0.04 or data['momentum']<=0: continue
-            base=sym.replace("USDT",""); entrada=data['precio']
-            con=sqlite3.connect(DB); con.execute("INSERT INTO trades (simbolo,precio,score,rsi,volx,tendencia,fg,noticia,resultado,pnl,real,fecha,tipo,momentum,entropia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sym,entrada,data['score'],data['rsi'],data['vol_x'],data['tendencia'],fg,str(noticias[:2]),"PENDIENTE",0,0,datetime.now().isoformat(),"SPOT",data['momentum'],data['entropia'])); con.commit(); con.close()
-            encontradas.append(f"{base} {fmt(entrada)} Sc {data['score']}/10 RSI {data['rsi']} Mom {data['momentum']} Ent {data['entropia']} BTC {btc}")
+            if not data or data['score']<9.0 or data['tendencia']!="alcista": continue
+            encontradas.append(f"{sym.replace('USDT','')} {fmt(data['precio'])} Sc {data['score']} Mom {data['momentum']}")
             if len(encontradas)>=3 or rev>300: break
-        if not encontradas: await update.message.reply_text(f"Revisadas {rev} Bloqueadas {bloq} Sin oportunidad 9/10 Trading {get_config('trading_real','OFF')}")
-        else: await update.message.reply_text(f"ULTRA {datetime.now().strftime('%H:%M')} F&G {fg} BTC {btc}\n" + "\n---\n".join(encontradas) + f"\n\nModo actual {get_config('trading_real','OFF')} - /trading_real_on para que compre solo")
+        if not encontradas: await update.message.reply_text(f"Revisadas {rev} Sin 9/10 pero sigo aprendiendo 24/7")
+        else: await update.message.reply_text("\n---\n".join(encontradas))
     except Exception as e: await update.message.reply_text(f"Error {e}")
-
-async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not client: client=Client()
-        tickers=client.get_ticker(); usdt=sorted([t for t in tickers if t['symbol'].endswith('USDT')], key=lambda x: float(x['quoteVolume']), reverse=True)
-        msg="TOP 10 ULTRA 24/7:\n"; c=0
-        for t in usdt:
-            if es_estable(t['symbol'],t['lastPrice']): continue
-            d=leer_grafico_ultra(t['symbol']); extra=f" Mom {d['momentum']}" if d else ""
-            msg+=f"{t['symbol'].replace('USDT','')} {fmt(t['lastPrice'])} {float(t['priceChangePercent']):+.1f}%{extra}\n"; c+=1
-            if c>=10: break
-        await update.message.reply_text(msg)
-    except Exception as e: await update.message.reply_text(f"Error {e}")
-
-async def analizar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args: await update.message.reply_text("Uso: /analizar BTCUSDT"); return
-        sym=context.args[0].upper()
-        if not sym.endswith("USDT"): sym+="USDT"
-        data=leer_grafico_ultra(sym)
-        if not data: await update.message.reply_text("Sin datos"); return
-        fg,_=get_fear_greed()
-        await update.message.reply_text(f"ANALISIS ULTRA {sym} {fmt(data['precio'])} RSI {data['rsi']} MACD {data['macd']} Stoch {data['stoch_k']} Mom {data['momentum']} Ent {data['entropia']} Score {data['score']}/10 F&G {fg} {'APTO' if data['score']>=9 else 'NO APTO'}")
-    except Exception as e: await update.message.reply_text(f"Error {e}")
-
-async def aprender_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        con=sqlite3.connect(DB); rows=con.execute("SELECT simbolo,precio,score,resultado,pnl,tipo FROM trades ORDER BY id DESC LIMIT 10").fetchall(); total=con.execute("SELECT COUNT(*), AVG(pnl) FROM trades WHERE pnl!=0").fetchone(); mem=con.execute("SELECT leccion FROM memoria ORDER BY id DESC LIMIT 3").fetchall(); con.close()
-        msg=f"CEREBRO ULTRA 24/7\nTrades {total[0] if total else 0} Avg {total[1] if total and total[1] else 0:.2f}% Trading Real {get_config('trading_real','OFF')}\n"
-        for m in mem: msg+=f"- {m[0][:80]}\n"
-        for r in rows: msg+=f"{r[5]} {r[0]} {fmt(r[1])} Sc {r[2]} {r[3]} {r[4]:+.1f}%\n"
-        await update.message.reply_text(msg)
-    except Exception as e: await update.message.reply_text(f"Error {e}")
-
-async def futuros_paper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    fg,_=get_fear_greed(); btc=get_tendencia_btc()
-    await update.message.reply_text(f"FUTUROS PAPER ON BTC {btc} F&G {fg} Aprende 14 dias 1x-3x antes de REAL")
 
 async def trading_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_config('trading_real','ON'); set_config('trades_hoy','0')
-    save_chat(update.effective_chat.id)
-    await update.message.reply_text(f"✅ TRADING REAL 24/7 365 ACTIVADO\nEl bot AHORA SI opera solo por ti en Binance SPOT\nMonto por trade {MONTO} USDT | Max 3 trades/dia | Stop 3.8%\nF&G proteccion ON | Usa /trading_real_off para parar\n/auto_on para que investigue cada 30 min")
-    guardar_memoria("Usuario ACTIVO trading real 24/7 365", "trading_real", "GENERAL")
+    set_config('trading_real','ON'); set_config('modo_inmortal','ON'); save_chat(update.effective_chat.id)
+    await update.message.reply_text("✅ MODO REAL INMORTAL 24/7 ACTIVADO\nCon plata: compra solo\nSin plata: SIGUE ANALIZANDO Y APRENDIENDO 24/7 sin descanso\nNunca se apaga\n/auto_on para activar scan cada 30 min")
+    guardar_memoria("MODO REAL INMORTAL ACTIVADO - Aprende con y sin dinero 24/7", "activacion", "GENERAL")
 
 async def trading_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_config('trading_real','OFF')
-    await update.message.reply_text("🛑 TRADING REAL OFF - Ahora solo avisa, no compra solo")
-    guardar_memoria("Usuario desactivo trading real", "trading_real", "GENERAL")
+    await update.message.reply_text("Trading real OFF - Ahora solo avisa y aprende")
 
 async def auto_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id)
     for j in context.job_queue.get_jobs_by_name("auto_scan"): j.schedule_removal()
+    for j in context.job_queue.get_jobs_by_name("auto_learn"): j.schedule_removal()
     context.job_queue.run_repeating(job_scan, interval=1800, first=10, name="auto_scan")
-    await update.message.reply_text(f"AUTO 24/7 ON - Cada 30 min investiga y si Trading Real ON, compra solo\nEstado Trading {get_config('trading_real','OFF')}")
+    context.job_queue.run_repeating(job_learn, interval=14400, first=20, name="auto_learn")
+    await update.message.reply_text(f"AUTO INMORTAL 24/7 ACTIVADO\nCada 30 min escanea 250 monedas aunque este en 0\nCada 4h aprende y guarda memoria\nTrading Real {get_config('trading_real','OFF')}")
 
 async def auto_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for j in context.job_queue.get_jobs_by_name("auto_scan"): j.schedule_removal()
-    await update.message.reply_text("AUTO OFF")
+    for j in context.job_queue.get_jobs_by_name("auto_learn"): j.schedule_removal()
+    await update.message.reply_text("AUTO OFF - Pero cerebro sigue vivo")
 
 def main():
     init_db()
@@ -262,15 +242,13 @@ def main():
     app=ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("oportunidad", oportunidad))
-    app.add_handler(CommandHandler("oportunidades", oportunidad))
-    app.add_handler(CommandHandler("top", top_cmd))
-    app.add_handler(CommandHandler("analizar", analizar_cmd))
-    app.add_handler(CommandHandler("aprender", aprender_cmd))
     app.add_handler(CommandHandler("auto_on", auto_on_cmd))
     app.add_handler(CommandHandler("auto_off", auto_off_cmd))
-    app.add_handler(CommandHandler("futuros_paper", futuros_paper_cmd))
     app.add_handler(CommandHandler("trading_real_on", trading_on_cmd))
     app.add_handler(CommandHandler("trading_real_off", trading_off_cmd))
-    log.info("ULTRA v11 FINAL 24/7 365 LISTO"); app.run_polling()
+    # Activa automaticamente 24/7 al iniciar
+    app.job_queue.run_repeating(job_scan, interval=1800, first=15, name="auto_scan")
+    app.job_queue.run_repeating(job_learn, interval=14400, first=30, name="auto_learn")
+    log.info("ULTRA v11.1 INMORTAL 24/7 365 LISTO - MODO REAL ON"); app.run_polling()
 
 if __name__=="__main__": main()
